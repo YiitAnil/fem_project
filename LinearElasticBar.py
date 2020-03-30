@@ -34,14 +34,28 @@ def build_mlp(dLInputScaling, mlp_name):
 #            Dense(10,activation = 'elu'),
 #            Dense(20,activation = 'elu'),
 #            Dense(40,activation = 'elu'),
-            Dense(64,activation = 'sigmoid')
+            Dense(64,activation = 'linear')
             ], name=mlp_name)
         optimizer = RMSprop(1e-2)
         model.compile(loss='mean_squared_error',
                       optimizer=optimizer,
                       metrics=['mean_absolute_error', 'mean_squared_error'])
         return model
-    
+
+def build_force_mlp(dLInputScaling, mlp_name):
+        model = Sequential([
+#            dLInputScaling,
+            Dense(3,activation = 'tanh'),
+#            Dense(10,activation = 'elu'),
+#            Dense(20,activation = 'elu'),
+#            Dense(40,activation = 'elu'),
+            Dense(8,activation = 'linear')
+            ], name=mlp_name)
+        optimizer = RMSprop(1e-2)
+        model.compile(loss='mean_squared_error',
+                      optimizer=optimizer,
+                      metrics=['mean_absolute_error', 'mean_squared_error'])
+        return model   
     
 class AMatrix(Layer):
     """        
@@ -115,8 +129,8 @@ class FMatrix(Layer):
         aux_shape = tensor_shape.TensorShape((None,1))
         return aux_shape[:-1].concatenate(1) 
 
-def create_fe_model(delta_stiffness_mlp, elastic_stiffness, force_vector, 
-                    stiffness_low, stiffness_up, batch_input_shape, myDtype):
+def create_fe_model(force_mlp, delta_stiffness_mlp, elastic_stiffness, force_vector, 
+                    force_low, force_up, stiffness_low, stiffness_up, batch_input_shape, myDtype):
     
     inputLayer = Input(shape=(1,))   
     
@@ -131,22 +145,28 @@ def create_fe_model(delta_stiffness_mlp, elastic_stiffness, force_vector,
     forceMatrixLayer = forceMatrixLayer(inputLayer)
     
     deltaStiffnessLayer = delta_stiffness_mlp(inputLayer)
-    scaledDeltaStiffnessLayer = Lambda(lambda x, stiffness_low=stiffness_low, stiffness_up=stiffness_up:
-    x*(stiffness_up-stiffness_low)+stiffness_low)(deltaStiffnessLayer)
+#    scaledDeltaStiffnessLayer = Lambda(lambda x, stiffness_low=stiffness_low, stiffness_up=stiffness_up:
+#    x*(stiffness_up-stiffness_low)+stiffness_low)(deltaStiffnessLayer)
     
-    deltaStiffnessReshapedLayer = Reshape((8, 8))(scaledDeltaStiffnessLayer)
+    deltaStiffnessReshapedLayer = Reshape((8, 8))(deltaStiffnessLayer)
     
-    correctedStiffnessLayer = Multiply()([elasticStiffnessLayer, deltaStiffnessReshapedLayer])
+    correctedStiffnessLayer = Add()([elasticStiffnessLayer, deltaStiffnessReshapedLayer])
     
     inverseStiffnessLayer = Lambda(lambda x: tf.linalg.inv(x))(correctedStiffnessLayer)
     
 #    deflectionOutputLayer = Lambda(lambda x: tf.linalg.matmul(x[0],x[1]))([inverseStiffnessLayer, forceMatrixLayer])
+#    deltaForceLayer = force_mlp(inputLayer)
+#    scaledDeltaForceLayer = Lambda(lambda x, force_low=force_low, force_up=force_up:
+#    x*(force_up-force_low)+force_low)(deltaForceLayer)
+    
+#    correctedForceLayer = Add()([forceMatrixLayer, deltaForceLayer])    
+    
     deflectionOutputLayer = Dot((1))([inverseStiffnessLayer, forceMatrixLayer])
     
     functionalModel = Model(inputs = [inputLayer], outputs = [deflectionOutputLayer])
     
     functionalModel.compile(loss=mse,
-                  optimizer=RMSprop(5e-3),
+                  optimizer=RMSprop(5e-1),
                   metrics=[mae])
     return functionalModel
 
@@ -302,7 +322,6 @@ plastic_io = pd.read_csv('./plastic_deflections.csv', index_col = False, header 
 
 force_input = np.asarray(plastic_io)[0,:]
 plastic_deflections = np.asarray(plastic_io)[1:,:]
-force_elastic = np.array([40000.0])
 
 
 force_vector = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
@@ -310,18 +329,21 @@ force_vector = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
 physics_model = create_physics_model(np.array([A_matrix]), force_vector, 
                     2e5, 6e5, force_input.shape, 'float32')
 
-elastic_deflection = physics_model.predict(force_elastic)
+elastic_deflection = physics_model.predict(force_input)
 dLInputScaling = getScalingDenseLayer(np.array([force_input.min(axis=0)]), np.array([force_input.max(axis=0)-force_input.min(axis=0)]))
 
 delta_stiffness_mlp = build_mlp(dLInputScaling, 'delta_stiffness')
 delta_stiffness_mlp.trainable = True
 
+force_mlp = build_force_mlp(dLInputScaling, 'delta_force')
+force_mlp.trainable = True
 
-fe_model = create_fe_model(delta_stiffness_mlp, np.array([A_matrix]), force_vector, 
-                           -1e0, 1e0, force_input.shape, 'float32')
+
+fe_model = create_fe_model(force_mlp, delta_stiffness_mlp, np.array([A_matrix]), force_vector, 
+                          1e1, 1e5, -1e3, 1e3, force_input.shape, 'float32')
 
 
-weight_path = "./1d_linear_bar_model_test6/cp.ckpt"
+weight_path = "./1d_linear_bar_model_kcorr/cp.ckpt"
 
 ModelCP = ModelCheckpoint(filepath=weight_path, monitor='loss',
                                                      verbose=1, save_best_only=True,
@@ -334,4 +356,30 @@ EPOCHS = 20000
 
 history = fe_model.fit(force_input, np.transpose(plastic_deflections), epochs=EPOCHS, verbose=1, callbacks=callbacks_list)
 
+fe_model.load_weights(weight_path)
+
 prediction = fe_model.predict(force_input)
+
+fig, ax = plt.subplots(3,3, sharex = True, sharey = True, figsize = (7,6))
+fig.text(0.5, 0.01, 'Normalized x (mm)', ha='center')
+fig.text(0.01, 0.5, 'u (mm)', va='center', rotation='vertical')
+ctr = 1
+for i in range(3):
+    for j in range(3):
+        ctr += 1
+        ax[i,j].plot(Nodes, np.zeros(Nx+1),'k-', linewidth = 5,label = 'Bar')
+        ax[i,j].plot(Nodes, np.append(np.array(EBC[0]),elastic_deflection[ctr,:]),'g--', linewidth = 2,label = 'Elastic Deflections')
+        ax[i,j].plot(Nodes, np.append(np.array(EBC[0]),plastic_deflections[:,ctr]),'r--', linewidth = 2,label = 'Ramberg-Osgood')
+        ax[i,j].plot(Nodes, np.append(np.array(EBC[0]),prediction[ctr,:]),'b--', linewidth = 2,label = 'Adjusted Model')
+#        plt.xlabel('x (mm)')
+#        plt.ylabel('u (mm)')
+        ax[i,j].set_xlim(0,L1)
+        ax[i,j].set_ylim(0,12.0)
+        ax[i,j].set_xticks([0,50,100,150,200])
+        ax[i,j].set_xticklabels([0,0.25,0.5,0.75,1])
+        ax[i,j].set_yticks([0,4,8,12])
+        ax[i,j].grid(True)
+
+ax[0,0].legend(fontsize=9, loc = 'upper left')
+fig.tight_layout()
+fig.show()
