@@ -119,9 +119,9 @@ class FMatrix(Layer):
         self.built = True
 
     def call(self, inputs):
-#        kernel_enhanced = array_ops.tile(tf.transpose([self.kernel]), tf.constant([1,array_ops.shape(inputs)[0]]))
+        kernel_enhanced = inputs * tf.constant([0.0,0.0,0.0,0.0,0.0,0.0,0.0,1.0])
 #        kernel_enhanced = tf.expand_dims(self.kernel,0)
-        output = self.kernel * inputs
+        output = self.kernel + kernel_enhanced
 #        output = array_ops.reshape(output,(array_ops.shape(output)[0],1))
         return output
 
@@ -252,8 +252,8 @@ for i in range(0, Nx):      # Modify this loop to assign different material prop
 EBC = np.array([0, 0], dtype='int')    # Assign EBC in the form [dof, dof value]
    
 # Distributed loads and NBC
-q = 0           # Distributed load (assumed constant)
-NBC = [Nx, 40000]   # Assign NBC in the form [dof, load value]
+q = 100           # Distributed load (assumed constant)
+NBC = [Nx, 21000]   # Assign NBC in the form [dof, load value]
     
     
 #
@@ -305,26 +305,26 @@ F_matrix = f_model[EBC[0]+1:,0]
 u =  np.linalg.solve(A_matrix,F_matrix-np.transpose(B_matrix*EBC[1]))
 R = np.dot(B_matrix,u) + C_matrix * EBC[1]
 
-#fig = plt.figure()
-#plt.plot(Nodes, np.zeros(Nx+1),'k-', linewidth = 10,label = 'Bar')
-#plt.plot(Nodes, np.append(np.array(EBC[0]),u),'r-o', linewidth = 3,label = 'Solution')
-#plt.xlabel('x (mm)')
-#plt.ylabel('u (mm)')
-#plt.xlim(0,L1)
-#plt.xticks(Nodes)
-#plt.grid(True)
-#plt.legend()
-#plt.tight_layout()
-#plt.show()
+fig = plt.figure()
+plt.plot(Nodes, np.zeros(Nx+1),'k-', linewidth = 10,label = 'Bar')
+plt.plot(Nodes, np.append(np.array(EBC[0]),u),'r-o', linewidth = 3,label = 'Solution')
+plt.xlabel('x (mm)')
+plt.ylabel('u (mm)')
+plt.xlim(0,L1)
+plt.xticks(Nodes)
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
 
 
-plastic_io = pd.read_csv('./plastic_deflections.csv', index_col = False, header = None)
+plastic_io = pd.read_csv('./plastic_deflections2.csv', index_col = False, header = None)
 
 force_input = np.asarray(plastic_io)[0,:]
 plastic_deflections = np.asarray(plastic_io)[1:,:]
 
-
-force_vector = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+F_matrix[-1] += -NBC[-1]
+force_vector = F_matrix
 
 physics_model = create_physics_model(np.array([A_matrix]), force_vector, 
                     2e5, 6e5, force_input.shape, 'float32')
@@ -343,42 +343,45 @@ fe_model = create_fe_model(force_mlp, delta_stiffness_mlp, np.array([A_matrix]),
                           1e1, 1e5, -1e3, 1e3, force_input.shape, 'float32')
 
 
-weight_path = "./1d_linear_bar_model_kcorr/cp.ckpt"
+#weight_path = "./test_50000EP/cp.ckpt"
+#
+#ModelCP = ModelCheckpoint(filepath=weight_path, monitor='loss',
+#                                                     verbose=1, save_best_only=True,
+#                                                     mode='min', save_weights_only=True) 
+#ReduceLR = ReduceLROnPlateau(monitor='loss', factor=0.85,
+#                                   min_lr = 1e-15, patience=100, verbose=1, mode='min')
+#ToNaN = TerminateOnNaN()
+#callbacks_list = [ReduceLR, ToNaN]
+#EPOCHS = 500000
+#
+#history = fe_model.fit(force_input, np.transpose(plastic_deflections), epochs=EPOCHS, verbose=1, callbacks=callbacks_list)
 
-ModelCP = ModelCheckpoint(filepath=weight_path, monitor='loss',
-                                                     verbose=1, save_best_only=True,
-                                                     mode='min', save_weights_only=True) 
-ReduceLR = ReduceLROnPlateau(monitor='loss', factor=0.85,
-                                   min_lr = 1e-15, patience=1000, verbose=1, mode='min')
-ToNaN = TerminateOnNaN()
-callbacks_list = [ReduceLR, ToNaN, ModelCP]
-EPOCHS = 20000
+#fe_model.save_weights("./test_500000EP.h5py")
 
-history = fe_model.fit(force_input, np.transpose(plastic_deflections), epochs=EPOCHS, verbose=1, callbacks=callbacks_list)
-
-fe_model.load_weights(weight_path)
+fe_model.load_weights("./test_500000EP.h5py")
 
 prediction = fe_model.predict(force_input)
 
-fig, ax = plt.subplots(3,3, sharex = True, sharey = True, figsize = (7,6))
+fig, ax = plt.subplots(3,4, sharex = True, sharey = True, figsize = (7*4/3,6))
 fig.text(0.5, 0.01, 'Normalized x (mm)', ha='center')
 fig.text(0.01, 0.5, 'u (mm)', va='center', rotation='vertical')
-ctr = 1
+ctr = -1
 for i in range(3):
-    for j in range(3):
+    for j in range(4):
         ctr += 1
-        ax[i,j].plot(Nodes, np.zeros(Nx+1),'k-', linewidth = 5,label = 'Bar')
-        ax[i,j].plot(Nodes, np.append(np.array(EBC[0]),elastic_deflection[ctr,:]),'g--', linewidth = 2,label = 'Elastic Deflections')
-        ax[i,j].plot(Nodes, np.append(np.array(EBC[0]),plastic_deflections[:,ctr]),'r--', linewidth = 2,label = 'Ramberg-Osgood')
-        ax[i,j].plot(Nodes, np.append(np.array(EBC[0]),prediction[ctr,:]),'b--', linewidth = 2,label = 'Adjusted Model')
-#        plt.xlabel('x (mm)')
-#        plt.ylabel('u (mm)')
-        ax[i,j].set_xlim(0,L1)
-        ax[i,j].set_ylim(0,12.0)
-        ax[i,j].set_xticks([0,50,100,150,200])
-        ax[i,j].set_xticklabels([0,0.25,0.5,0.75,1])
-        ax[i,j].set_yticks([0,4,8,12])
-        ax[i,j].grid(True)
+        if ctr != 11:
+            ax[i,j].plot(Nodes, np.zeros(Nx+1),'k-', linewidth = 5,label = 'Bar')
+            ax[i,j].plot(Nodes, np.append(np.array(EBC[0]),elastic_deflection[ctr,:]),'g--', linewidth = 2,label = 'Elastic Deflections')
+            ax[i,j].plot(Nodes, np.append(np.array(EBC[0]),plastic_deflections[:,ctr]),'r--', linewidth = 2,label = 'Ramberg-Osgood')
+            ax[i,j].plot(Nodes, np.append(np.array(EBC[0]),prediction[ctr,:]),'b--', linewidth = 2,label = 'Adjusted Model')
+    #        plt.xlabel('x (mm)')
+    #        plt.ylabel('u (mm)')
+            ax[i,j].set_xlim(0,L1)
+            ax[i,j].set_ylim(0,12.0)
+            ax[i,j].set_xticks([0,50,100,150,200])
+            ax[i,j].set_xticklabels([0,0.25,0.5,0.75,1])
+            ax[i,j].set_yticks([0,4,8,12])
+            ax[i,j].grid(True)
 
 ax[0,0].legend(fontsize=9, loc = 'upper left')
 fig.tight_layout()

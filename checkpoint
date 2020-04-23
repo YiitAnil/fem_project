@@ -1,0 +1,2 @@
+model_checkpoint_path: "test_500000EP.h5py"
+all_model_checkpoint_paths: "test_500000EP.h5py"
